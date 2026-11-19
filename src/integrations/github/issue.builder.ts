@@ -1,70 +1,94 @@
 import type { ConversationState, FieldDefinition } from '../../conversation/types.js';
-import { resolveFieldAnswers } from '../../flows/answers.js';
+import type { IssueLevel } from '../../flows/issue-report.fields.js';
+
+const MAX_TITLE_LENGTH = 140;
+const MAX_FALLBACK_TITLE_LENGTH = 80;
+const MAX_BODY_LENGTH = 60_000;
+
+const ID_FORMAT_REGEX = /^[A-Za-z0-9._-]+$/;
 
 export interface IssueContent {
   title: string;
   body: string;
+  labels: string[];
 }
 
 export function buildIssueContent(input: {
   state: ConversationState;
   fields: FieldDefinition[];
   rocketChatUrl: string;
+  level: IssueLevel;
+  title: string;
 }): IssueContent {
-  const answers = resolveFieldAnswers(input.state, input.fields);
-  const title = buildTitle(answers, input.state);
-  const threadLink = buildThreadLink(input.rocketChatUrl, input.state);
-
-  const sections = input.fields
-    .filter((field) => field.key !== 'title')
-    .map((field) => {
-      const value = answers[field.key]?.trim();
-
-      if (!value) {
-        return null;
-      }
-
-      return `## ${field.label}\n\n${value}`;
-    })
-    .filter((section): section is string => section !== null);
-
-  const header = [
-    `**Solicitante:** ${input.state.username} (\`${input.state.userId}\`)`,
-    `**Canal:** \`${input.state.roomId}\``,
-    `**Thread no Rocket.Chat:** ${threadLink}`,
-  ].join('\n');
-
   return {
-    title,
-    body: [
-      header,
-      '---',
-      ...sections,
-      '',
-      '_Issue criada automaticamente pelo bot do Rocket.Chat._',
-    ].join('\n\n'),
+    title: buildTitle(input.title, input.state, input.level),
+    body: buildBody(input.state, input.fields, input.rocketChatUrl, input.level),
+    labels: [input.level],
   };
 }
 
-function buildTitle(answers: Record<string, string>, state: ConversationState): string {
-  const explicitTitle = answers.title?.trim();
+function buildTitle(aiTitle: string, state: ConversationState, level: IssueLevel): string {
+  const baseTitle = cleanTitle(aiTitle) || buildFallbackTitle(state);
+  const atendimentoId = state.answers.atendimentoId?.trim();
+  const idPart = atendimentoId && ID_FORMAT_REGEX.test(atendimentoId) ? `#${atendimentoId} - ` : '';
 
-  if (explicitTitle) {
-    return truncate(explicitTitle, 120);
+  return truncate(`[${level}] ${idPart}${baseTitle}`, MAX_TITLE_LENGTH);
+}
+
+function buildFallbackTitle(state: ConversationState): string {
+  const candidate =
+    state.answers.clienteDisse?.trim() ||
+    state.initialMessage.trim() ||
+    `Solicitação de ${state.username}`;
+
+  return truncate(cleanTitle(candidate), MAX_FALLBACK_TITLE_LENGTH);
+}
+
+function buildBody(
+  state: ConversationState,
+  fields: FieldDefinition[],
+  rocketChatUrl: string,
+  level: IssueLevel,
+): string {
+  const header = [
+    `**Solicitante:** ${state.username} (\`${state.userId}\`)`,
+    `**Canal:** \`${state.roomId}\``,
+    `**Thread no Rocket.Chat:** ${buildThreadLink(rocketChatUrl, state)}`,
+    `**Nível:** ${level}`,
+  ].join('\n');
+
+  const sections = fields.map((field) => {
+    const value = state.answers[field.key]?.trim() || '_Não informado_';
+    return `## ${field.label}\n\n${value}`;
+  });
+
+  const body = [
+    header,
+    '---',
+    ...sections,
+    '',
+    '_Issue criada automaticamente pelo bot do Rocket.Chat._',
+  ].join('\n\n');
+
+  if (body.length <= MAX_BODY_LENGTH) {
+    return body;
   }
 
-  const description = (answers.description ?? state.initialMessage).trim().replace(/\s+/g, ' ');
-
-  if (description) {
-    return truncate(description, 80);
-  }
-
-  return truncate(`Solicitação de ${state.username}`, 120);
+  const notice = '\n\n_Conteúdo truncado por exceder o limite do GitHub._';
+  return `${body.slice(0, MAX_BODY_LENGTH - notice.length).trimEnd()}${notice}`;
 }
 
 function buildThreadLink(rocketChatUrl: string, state: ConversationState): string {
   const baseUrl = rocketChatUrl.replace(/\/+$/, '');
   return `${baseUrl}/channel/${encodeURIComponent(state.roomId)}?msg=${encodeURIComponent(state.threadId)}`;
+}
+
+function cleanTitle(value: string): string {
+  return value
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .trim();
 }
 
 function truncate(value: string, maxLength: number): string {

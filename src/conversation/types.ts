@@ -1,19 +1,31 @@
 export type ConversationStatus = 'collecting' | 'creating_issue' | 'completed' | 'failed';
 
+export interface MessageAttachment {
+  url: string;
+  name?: string;
+  mimeType?: string;
+  isImage: boolean;
+}
+
 export interface ConversationState {
-  version: 1;
+  version: 2;
   roomId: string;
   userId: string;
   username: string;
   threadId: string;
   initialMessage: string;
+  initialAttachments: MessageAttachment[];
   status: ConversationStatus;
+  intakeDone: boolean;
   answers: Record<string, string>;
-  askedFields: string[];
+  questionQueue: string[];
   pendingFieldKey: string | null;
+  levelRetryCount: number;
   lastMessageId: string;
   lastActivityAt: string;
+  issueNumber?: number;
   issueUrl?: string;
+  issueTitle?: string;
   error?: string;
 }
 
@@ -23,6 +35,7 @@ export interface IncomingMessage {
   userId: string;
   username: string;
   text: string;
+  attachments: MessageAttachment[];
   threadId: string;
 }
 
@@ -30,23 +43,7 @@ export interface FieldDefinition {
   key: string;
   label: string;
   question: string;
-  required: boolean;
-  maxLength?: number;
-}
-
-export interface PlannerInput {
-  message: string;
-  state: ConversationState;
-  fields: FieldDefinition[];
-}
-
-export type PlannerDecision =
-  | { type: 'ask'; fieldKey: string; question: string }
-  | { type: 'create_issue'; title: string; body: string }
-  | { type: 'ignore'; reason?: string };
-
-export interface ConversationPlanner {
-  evaluate(input: PlannerInput): Promise<PlannerDecision>;
+  allowsNotApplicable: boolean;
 }
 
 export interface MessageSender {
@@ -59,7 +56,7 @@ export interface CreatedIssue {
 }
 
 export interface IssueCreator {
-  createIssue(input: { title: string; body: string }): Promise<CreatedIssue>;
+  createIssue(input: { title: string; body: string; labels?: string[] }): Promise<CreatedIssue>;
 }
 
 export interface MessageProcessor {

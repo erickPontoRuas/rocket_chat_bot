@@ -4,9 +4,10 @@ import { createLogger } from './logger.js';
 import { RocketChatClient } from './bot/rocket-chat.client.js';
 import { MessageHandler } from './bot/message-handler.js';
 import { ConversationService } from './conversation/conversation.service.js';
-import { SequentialPlanner } from './conversation/planner/sequential.planner.js';
 import { ConversationRepository, RedisConversationStore } from './conversation/state.repository.js';
 import { ISSUE_REPORT_FIELDS } from './flows/issue-report.fields.js';
+import { OpenAiJsonCompletionClient } from './integrations/ai/openai.completion-client.js';
+import { OpenAiIssueAssistant } from './integrations/ai/openai.issue-assistant.js';
 import { GitHubIssueCreator } from './integrations/github/github.client.js';
 import { RedisLocker } from './utils/lock.js';
 
@@ -36,7 +37,13 @@ async function main(): Promise<void> {
     new RedisConversationStore(redis),
     config.redis.conversationTtlSeconds,
   );
-  const planner = new SequentialPlanner(ISSUE_REPORT_FIELDS, config.rocketChat.url);
+  const completionClient = new OpenAiJsonCompletionClient({
+    apiKey: config.ai.apiKey,
+    model: config.ai.model,
+    ...(config.ai.baseUrl ? { baseUrl: config.ai.baseUrl } : {}),
+    timeoutMs: config.ai.timeoutMs,
+  });
+  const aiAssistant = new OpenAiIssueAssistant({ completionClient, logger });
   const locker = new RedisLocker(redis);
   const issueCreator = new GitHubIssueCreator({
     token: config.github.token,
@@ -66,12 +73,15 @@ async function main(): Promise<void> {
 
   const conversationService = new ConversationService({
     repository,
-    planner,
+    analyzer: aiAssistant,
+    levelNormalizer: aiAssistant,
+    titleGenerator: aiAssistant,
     issueCreator,
     sender: rocketChat,
     locker,
     logger,
     fields: ISSUE_REPORT_FIELDS,
+    rocketChatUrl: config.rocketChat.url,
   });
 
   await rocketChat.start();
@@ -79,6 +89,7 @@ async function main(): Promise<void> {
   handler = new MessageHandler({
     botUserId: rocketChat.currentUserId,
     roomId: config.rocketChat.roomId,
+    rocketChatUrl: config.rocketChat.url,
     service: conversationService,
     repository,
     logger,

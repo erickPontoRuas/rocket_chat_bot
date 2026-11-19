@@ -36,6 +36,7 @@ function createHandler(): { handler: MessageHandler; service: RecordingService }
   const handler = new MessageHandler({
     botUserId: 'bot-1',
     roomId: 'room-1',
+    rocketChatUrl: 'https://chat.exemplo.com',
     service,
     repository,
     logger: silentLogger,
@@ -88,5 +89,66 @@ describe('MessageHandler', () => {
     await handler.handle(buildEvent({ _id: 'empty', msg: '   ' }));
 
     expect(service.messages).toHaveLength(0);
+  });
+
+  it('encaminha mensagem somente com anexo de imagem', async () => {
+    const { handler, service } = createHandler();
+
+    await handler.handle(
+      buildEvent({
+        _id: 'attachment-only',
+        msg: '',
+        attachments: [{ image_url: '/file-upload/print.png' }],
+      }),
+    );
+
+    expect(service.messages).toHaveLength(1);
+    expect(service.messages[0]?.text).toBe('');
+    expect(service.messages[0]?.attachments).toEqual([
+      { url: 'https://chat.exemplo.com/file-upload/print.png', isImage: true },
+    ]);
+  });
+
+  it('respeita URLs absolutas e converte URLs relativas de anexos', async () => {
+    const { handler, service } = createHandler();
+
+    await handler.handle(
+      buildEvent({
+        _id: 'absolute',
+        attachments: [{ image_url: 'https://cdn.exemplo.com/print.jpg' }],
+        files: [{ name: 'screenshot', type: 'image/png', url: '/file-upload/screenshot' }],
+      }),
+    );
+
+    expect(service.messages[0]?.attachments).toEqual([
+      { url: 'https://cdn.exemplo.com/print.jpg', isImage: true },
+      {
+        url: 'https://chat.exemplo.com/file-upload/screenshot',
+        name: 'screenshot',
+        mimeType: 'image/png',
+        isImage: true,
+      },
+    ]);
+  });
+
+  it('marca anexos que não são imagem sem tratá-los como print', async () => {
+    const { handler, service } = createHandler();
+
+    await handler.handle(
+      buildEvent({
+        _id: 'log-file',
+        msg: '',
+        files: [{ name: 'log.txt', type: 'text/plain', url: '/file-upload/log.txt' }],
+      }),
+    );
+
+    expect(service.messages[0]?.attachments).toEqual([
+      {
+        url: 'https://chat.exemplo.com/file-upload/log.txt',
+        name: 'log.txt',
+        mimeType: 'text/plain',
+        isImage: false,
+      },
+    ]);
   });
 });

@@ -1,33 +1,47 @@
 import type { Logger } from 'pino';
 import type { ConversationRepository } from './state.repository.js';
 import type {
-  ConversationPlanner,
   ConversationState,
   FieldDefinition,
   IncomingMessage,
   IssueCreator,
   MessageProcessor,
   MessageSender,
-  PlannerDecision,
 } from './types.js';
 import type { Locker } from '../utils/lock.js';
+import type { IssueLevel } from '../flows/issue-report.fields.js';
+import { isIssueLevel } from '../flows/issue-report.fields.js';
+import { buildIssueContent } from '../integrations/github/issue.builder.js';
+import type {
+  LevelNormalizer,
+  ReportAnalyzer,
+  ReportIntake,
+  TitleGenerator,
+} from '../integrations/ai/types.js';
 
-const CONVERSATION_LOCK_TTL_MS = 10_000;
-const ISSUE_LOCK_TTL_MS = 60_000;
+const CONVERSATION_LOCK_TTL_MS = 120_000;
+const ISSUE_LOCK_TTL_MS = 120_000;
 
 const GENERIC_FAILURE_REPLY =
   'Não consegui processar sua mensagem agora. Tente novamente em instantes.';
 const ISSUE_FAILURE_REPLY =
   'Não consegui criar a issue no GitHub. Envie uma nova mensagem para recomeçar o atendimento.';
+const AI_ANALYSIS_FAILURE_NOTE =
+  'Não consegui analisar sua mensagem automaticamente. Vou perguntar os itens um a um.';
+const INVALID_LEVEL_REPLY =
+  'Não consegui identificar o nível. Responda com **ATRAPALHA** ou **PERDE VENDA**.';
 
 interface ConversationServiceDependencies {
   repository: ConversationRepository;
-  planner: ConversationPlanner;
+  analyzer: ReportAnalyzer;
+  levelNormalizer: LevelNormalizer;
+  titleGenerator: TitleGenerator;
   issueCreator: IssueCreator;
   sender: MessageSender;
   locker: Locker;
   logger: Logger;
   fields: FieldDefinition[];
+  rocketChatUrl: string;
   now?: () => Date;
 }
 
@@ -68,64 +82,177 @@ export class ConversationService implements MessageProcessor {
 
   private async processMessage(message: IncomingMessage): Promise<void> {
     const existingState = await this.deps.repository.get(message.roomId, message.userId);
-    const state = existingState ?? this.createState(message);
 
-    if (state.pendingFieldKey) {
-      state.answers[state.pendingFieldKey] = message.text;
+    if (!existingState) {
+      await this.startConversation(message);
+      return;
+    }
+
+    if (!existingState.intakeDone) {
+      await this.runIntake(
+        existingState,
+        existingState.initialMessage,
+        existingState.initialAttachments,
+      );
+      return;
+    }
+
+    if (existingState.status !== 'collecting') {
+      existingState.status = 'collecting';
+      existingState.error = undefined;
+    }
+
+    if (!existingState.pendingFieldKey) {
+      existingState.lastMessageId = message.id;
+      existingState.lastActivityAt = this.nowIso();
+      await this.deps.repository.save(existingState);
+
+      if (existingState.questionQueue.length === 0) {
+        await this.finalize(existingState);
+        return;
+      }
+
+      await this.askNext(existingState);
+      return;
+    }
+
+    await this.recordAnswer(existingState, message);
+  }
+
+  private async startConversation(message: IncomingMessage): Promise<void> {
+    const state = this.createState(message);
+    await this.runIntake(state, message.text, message.attachments);
+  }
+
+  private async runIntake(
+    state: ConversationState,
+    message: string,
+    attachments: ConversationState['initialAttachments'],
+  ): Promise<void> {
+    let intake: ReportIntake;
+    let analysisFailed = false;
+
+    try {
+      intake = await this.deps.analyzer.analyze({
+        message,
+        attachments,
+        fields: this.deps.fields,
+      });
+    } catch (error) {
+      analysisFailed = true;
+      this.deps.logger.error(
+        { err: error, roomId: state.roomId, userId: state.userId },
+        'Falha ao avaliar o relato com a IA; usando fila completa',
+      );
+      intake = { values: {}, missing: this.deps.fields.map((field) => field.key) };
+    }
+
+    state.answers = intake.values;
+    state.questionQueue = this.normalizeQueue(state, intake.missing);
+    state.intakeDone = true;
+    state.pendingFieldKey = null;
+    state.lastActivityAt = this.nowIso();
+    await this.deps.repository.save(state);
+
+    this.deps.logger.info(
+      {
+        roomId: state.roomId,
+        userId: state.userId,
+        present: Object.keys(intake.values).length,
+        missing: state.questionQueue.length,
+        analysisFailed,
+      },
+      'Relato avaliado pela IA',
+    );
+
+    if (state.questionQueue.length === 0) {
+      await this.finalize(state);
+      return;
+    }
+
+    const summary = this.buildIntakeSummary(state.questionQueue);
+    const intro = analysisFailed ? `${AI_ANALYSIS_FAILURE_NOTE}\n\n${summary}` : summary;
+    await this.askNext(state, intro);
+  }
+
+  private async askNext(state: ConversationState, intro?: string): Promise<void> {
+    const key = state.questionQueue[0];
+    const field = key ? this.fieldByKey(key) : undefined;
+
+    if (!key || !field) {
+      this.deps.logger.error(
+        { roomId: state.roomId, userId: state.userId, key },
+        'Fila de perguntas inválida; finalizando',
+      );
+      await this.finalize(state);
+      return;
+    }
+
+    state.pendingFieldKey = key;
+    state.lastActivityAt = this.nowIso();
+    await this.deps.repository.save(state);
+
+    const text = intro ? `${intro}\n\n${field.question}` : field.question;
+    await this.deps.sender.replyInThread(state.roomId, state.threadId, text);
+  }
+
+  private async recordAnswer(state: ConversationState, message: IncomingMessage): Promise<void> {
+    const key = state.pendingFieldKey;
+
+    if (!key) {
+      return;
+    }
+
+    const field = this.fieldByKey(key);
+
+    if (!field) {
       state.pendingFieldKey = null;
+      state.lastActivityAt = this.nowIso();
+      await this.deps.repository.save(state);
+      await this.askNext(state);
+      return;
     }
 
-    if (state.status !== 'collecting') {
-      state.status = 'collecting';
-      state.error = undefined;
+    const value = formatMessageValue(message);
+
+    if (key === 'nivel') {
+      const normalized = await this.deps.levelNormalizer.normalize({ answer: value });
+
+      if (normalized) {
+        state.answers[key] = normalized;
+      } else if (state.levelRetryCount < 1) {
+        state.levelRetryCount += 1;
+        state.lastMessageId = message.id;
+        state.lastActivityAt = this.nowIso();
+        await this.deps.repository.save(state);
+        await this.deps.sender.replyInThread(state.roomId, state.threadId, INVALID_LEVEL_REPLY);
+        return;
+      } else {
+        state.answers[key] = 'ATRAPALHA';
+        this.deps.logger.warn(
+          { roomId: state.roomId, userId: state.userId, answerLength: value.length },
+          'Nível inválido após repergunta; usando ATRAPALHA',
+        );
+      }
+    } else {
+      state.answers[key] = value;
     }
 
+    state.questionQueue = state.questionQueue.filter((queuedKey) => queuedKey !== key);
+    state.pendingFieldKey = null;
     state.lastMessageId = message.id;
     state.lastActivityAt = this.nowIso();
-
     await this.deps.repository.save(state);
 
-    const decision = await this.deps.planner.evaluate({
-      message: message.text,
-      state,
-      fields: this.deps.fields,
-    });
-
-    switch (decision.type) {
-      case 'ask':
-        await this.handleAsk(state, decision);
-        break;
-      case 'create_issue':
-        await this.handleCreateIssue(state, decision);
-        break;
-      case 'ignore':
-        this.deps.logger.debug(
-          { roomId: state.roomId, userId: state.userId, reason: decision.reason },
-          'Mensagem ignorada pelo planner',
-        );
-        break;
-    }
-  }
-
-  private async handleAsk(
-    state: ConversationState,
-    decision: Extract<PlannerDecision, { type: 'ask' }>,
-  ): Promise<void> {
-    state.pendingFieldKey = decision.fieldKey;
-
-    if (!state.askedFields.includes(decision.fieldKey)) {
-      state.askedFields.push(decision.fieldKey);
+    if (state.questionQueue.length === 0) {
+      await this.finalize(state);
+      return;
     }
 
-    state.lastActivityAt = this.nowIso();
-    await this.deps.repository.save(state);
-    await this.deps.sender.replyInThread(state.roomId, state.threadId, decision.question);
+    await this.askNext(state);
   }
 
-  private async handleCreateIssue(
-    state: ConversationState,
-    decision: Extract<PlannerDecision, { type: 'create_issue' }>,
-  ): Promise<void> {
+  private async finalize(state: ConversationState): Promise<void> {
     state.status = 'creating_issue';
     state.pendingFieldKey = null;
     state.lastActivityAt = this.nowIso();
@@ -145,13 +272,26 @@ export class ConversationService implements MessageProcessor {
     }
 
     try {
+      const level = this.resolveLevel(state);
+      const title = await this.generateTitle(state, level);
+      const content = buildIssueContent({
+        state,
+        fields: this.deps.fields,
+        rocketChatUrl: this.deps.rocketChatUrl,
+        level,
+        title,
+      });
+
       const issue = await this.deps.issueCreator.createIssue({
-        title: decision.title,
-        body: decision.body,
+        title: content.title,
+        body: content.body,
+        labels: content.labels,
       });
 
       state.status = 'completed';
+      state.issueNumber = issue.number;
       state.issueUrl = issue.url;
+      state.issueTitle = content.title;
       state.lastActivityAt = this.nowIso();
       await this.deps.repository.save(state);
       await this.deps.repository.delete(state.roomId, state.userId);
@@ -160,12 +300,12 @@ export class ConversationService implements MessageProcessor {
         await this.deps.sender.replyInThread(
           state.roomId,
           state.threadId,
-          `Issue criada com sucesso: ${issue.url}`,
+          buildCompletionMessage(state, content.title, issue.number, issue.url, level),
         );
       } catch (sendError) {
         this.deps.logger.error(
           { err: sendError, roomId: state.roomId, userId: state.userId, issueUrl: issue.url },
-          'Issue criada, mas falha ao enviar o link na thread',
+          'Issue criada, mas falha ao enviar a confirmação na thread',
         );
       }
     } catch (error) {
@@ -198,6 +338,60 @@ export class ConversationService implements MessageProcessor {
     }
   }
 
+  private async generateTitle(state: ConversationState, level: IssueLevel): Promise<string> {
+    try {
+      return await this.deps.titleGenerator.generate({
+        answers: state.answers,
+        fields: this.deps.fields,
+        level,
+      });
+    } catch (error) {
+      this.deps.logger.warn(
+        { err: error, roomId: state.roomId, userId: state.userId },
+        'Falha ao gerar título com IA; usando fallback',
+      );
+      return '';
+    }
+  }
+
+  private resolveLevel(state: ConversationState): IssueLevel {
+    const value = state.answers.nivel?.trim().toUpperCase();
+
+    if (value && isIssueLevel(value)) {
+      return value;
+    }
+
+    this.deps.logger.warn(
+      { roomId: state.roomId, userId: state.userId },
+      'Nível ausente ou inválido na finalização; usando ATRAPALHA',
+    );
+
+    return 'ATRAPALHA';
+  }
+
+  private normalizeQueue(state: ConversationState, missing: string[]): string[] {
+    const missingSet = new Set(missing);
+
+    return this.deps.fields
+      .filter((field) => missingSet.has(field.key) && !state.answers[field.key]?.trim())
+      .map((field) => field.key);
+  }
+
+  private buildIntakeSummary(keys: string[]): string {
+    const labels = keys.map((key) => this.fieldByKey(key)?.label ?? key);
+
+    return [
+      'Recebi seu relato. Para abrir a issue, ainda preciso de:',
+      ...labels.map((label) => `- ${label}`),
+      '',
+      'Você pode responder "não se aplica" quando não houver informação (exceto para o nível).',
+    ].join('\n');
+  }
+
+  private fieldByKey(key: string): FieldDefinition | undefined {
+    return this.deps.fields.find((field) => field.key === key);
+  }
+
   private async notifyFailure(message: IncomingMessage): Promise<void> {
     try {
       await this.deps.sender.replyInThread(message.roomId, message.threadId, GENERIC_FAILURE_REPLY);
@@ -214,16 +408,19 @@ export class ConversationService implements MessageProcessor {
 
   private createState(message: IncomingMessage): ConversationState {
     return {
-      version: 1,
+      version: 2,
       roomId: message.roomId,
       userId: message.userId,
       username: message.username,
       threadId: message.threadId,
       initialMessage: message.text,
+      initialAttachments: message.attachments,
       status: 'collecting',
+      intakeDone: false,
       answers: {},
-      askedFields: [],
+      questionQueue: [],
       pendingFieldKey: null,
+      levelRetryCount: 0,
       lastMessageId: message.id,
       lastActivityAt: this.nowIso(),
     };
@@ -232,6 +429,38 @@ export class ConversationService implements MessageProcessor {
   private nowIso(): string {
     return (this.deps.now?.() ?? new Date()).toISOString();
   }
+}
+
+function formatMessageValue(message: IncomingMessage): string {
+  const parts: string[] = [];
+  const text = message.text.trim();
+
+  if (text) {
+    parts.push(text);
+  }
+
+  for (const attachment of message.attachments) {
+    parts.push(attachment.url);
+  }
+
+  return parts.join('\n');
+}
+
+function buildCompletionMessage(
+  state: ConversationState,
+  title: string,
+  number: number,
+  url: string,
+  level: IssueLevel,
+): string {
+  const atendimentoId = state.answers.atendimentoId?.trim();
+
+  return [
+    `Issue criada: #${number} — ${title}`,
+    `Nível: ${level}`,
+    `Atendimento: ${atendimentoId || 'não informado'}`,
+    `Link: ${url}`,
+  ].join('\n');
 }
 
 function conversationLockKey(roomId: string, userId: string): string {

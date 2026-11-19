@@ -18,14 +18,20 @@ export class GitHubIssueCreator implements IssueCreator {
     this.octokit = new Octokit({ auth: deps.token });
   }
 
-  async createIssue(input: { title: string; body: string }): Promise<CreatedIssue> {
+  async createIssue(input: {
+    title: string;
+    body: string;
+    labels?: string[];
+  }): Promise<CreatedIssue> {
+    const labels = mergeLabels(this.deps.labels, input.labels ?? []);
+
     try {
       const response = await this.octokit.rest.issues.create({
         owner: this.deps.owner,
         repo: this.deps.repo,
         title: input.title,
         body: input.body,
-        ...(this.deps.labels.length > 0 ? { labels: this.deps.labels } : {}),
+        ...(labels.length > 0 ? { labels } : {}),
       });
 
       const issue: CreatedIssue = {
@@ -54,4 +60,24 @@ export class GitHubIssueCreator implements IssueCreator {
       );
     }
   }
+}
+
+function mergeLabels(base: string[], extra: string[]): string[] {
+  const byKey = new Map<string, string>();
+
+  for (const label of [...base, ...extra]) {
+    const trimmed = label.trim();
+
+    if (!trimmed) {
+      continue;
+    }
+
+    const key = trimmed.toLowerCase();
+
+    if (!byKey.has(key)) {
+      byKey.set(key, trimmed);
+    }
+  }
+
+  return [...byKey.values()];
 }

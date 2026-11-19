@@ -59,7 +59,13 @@ export class ConversationRepository {
 
     try {
       const parsed: unknown = JSON.parse(raw);
-      return isConversationState(parsed) ? parsed : null;
+
+      if (!isConversationState(parsed)) {
+        await this.delete(roomId, userId);
+        return null;
+      }
+
+      return parsed;
     } catch {
       await this.delete(roomId, userId);
       return null;
@@ -95,16 +101,21 @@ function isConversationState(value: unknown): value is ConversationState {
   const candidate = value as Partial<ConversationState>;
 
   return (
-    candidate.version === 1 &&
+    candidate.version === 2 &&
     typeof candidate.roomId === 'string' &&
     typeof candidate.userId === 'string' &&
     typeof candidate.username === 'string' &&
     typeof candidate.threadId === 'string' &&
     typeof candidate.initialMessage === 'string' &&
+    Array.isArray(candidate.initialAttachments) &&
     typeof candidate.status === 'string' &&
+    typeof candidate.intakeDone === 'boolean' &&
     typeof candidate.answers === 'object' &&
     candidate.answers !== null &&
-    Array.isArray(candidate.askedFields) &&
+    Array.isArray(candidate.questionQueue) &&
+    candidate.questionQueue.every((key) => typeof key === 'string') &&
+    (candidate.pendingFieldKey === null || typeof candidate.pendingFieldKey === 'string') &&
+    typeof candidate.levelRetryCount === 'number' &&
     typeof candidate.lastMessageId === 'string' &&
     typeof candidate.lastActivityAt === 'string'
   );

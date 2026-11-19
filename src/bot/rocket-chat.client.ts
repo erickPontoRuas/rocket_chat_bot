@@ -2,6 +2,18 @@ import { driver } from '@rocket.chat/sdk';
 import type { Logger } from 'pino';
 import type { MessageSender } from '../conversation/types.js';
 
+export interface RocketChatAttachment {
+  image_url?: string;
+  title_link?: string;
+  type?: string;
+}
+
+export interface RocketChatFile {
+  name?: string;
+  type?: string;
+  url?: string;
+}
+
 export interface RocketChatRawMessage {
   _id?: string;
   rid?: string;
@@ -9,6 +21,9 @@ export interface RocketChatRawMessage {
   tmid?: string;
   t?: string;
   editedAt?: unknown;
+  attachments?: RocketChatAttachment[];
+  files?: RocketChatFile[];
+  file?: RocketChatFile;
   u?: {
     _id?: string;
     username?: string;

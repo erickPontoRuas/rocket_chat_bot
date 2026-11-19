@@ -27,6 +27,16 @@ const envSchema = z.object({
   GITHUB_OWNER: z.string().min(1),
   GITHUB_REPO: z.string().min(1),
   GITHUB_LABELS: z.string().optional(),
+  OPENAI_API_KEY: z.string().min(1),
+  OPENAI_MODEL: z.string().min(1).default('gpt-4o-mini'),
+  OPENAI_BASE_URL: z
+    .string()
+    .url()
+    .refine((value) => value.startsWith('http://') || value.startsWith('https://'), {
+      message: 'deve ser uma URL http(s)',
+    })
+    .optional(),
+  OPENAI_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
 });
 
 export type LogLevel = z.infer<typeof logLevelSchema>;
@@ -50,6 +60,12 @@ export interface AppConfig {
     owner: string;
     repo: string;
     labels: string[];
+  };
+  ai: {
+    apiKey: string;
+    model: string;
+    baseUrl?: string;
+    timeoutMs: number;
   };
 }
 
@@ -83,6 +99,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       owner: data.GITHUB_OWNER,
       repo: data.GITHUB_REPO,
       labels: parseLabels(data.GITHUB_LABELS),
+    },
+    ai: {
+      apiKey: data.OPENAI_API_KEY,
+      model: data.OPENAI_MODEL,
+      ...(data.OPENAI_BASE_URL ? { baseUrl: data.OPENAI_BASE_URL } : {}),
+      timeoutMs: data.OPENAI_TIMEOUT_MS,
     },
   };
 }

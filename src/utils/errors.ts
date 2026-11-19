@@ -8,3 +8,5 @@ export class DomainError extends Error {
 export class ConfigurationError extends DomainError {}
 
 export class IssueCreationError extends DomainError {}
+
+export class AiIntegrationError extends DomainError {}

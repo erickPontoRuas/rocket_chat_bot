@@ -93,9 +93,8 @@ export class RocketChatClient implements MessageSender {
     this.deps.logger.info({ roomId: this.deps.roomId }, 'Escutando mensagens do canal');
   }
 
-  async replyInThread(roomId: string, threadId: string, text: string): Promise<void> {
+  async reply(roomId: string, text: string): Promise<void> {
     const prepared = driver.prepareMessage(text, roomId);
-    (prepared as unknown as { tmid?: string }).tmid = threadId;
     await driver.sendMessage(prepared);
   }
 

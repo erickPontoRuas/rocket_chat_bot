@@ -34,6 +34,32 @@ interface OpenAiIssueAssistantDependencies {
 }
 
 const IMAGE_URL_REGEX = /https?:\/\/[^\s<>"']+\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^\s<>"']*)?/gi;
+const URL_REGEX = /https?:\/\/[^\s<>"']+/gi;
+const MIN_EVIDENCE_CHARS = 3;
+const MIN_SUBSTANTIVE_WORDS = 2;
+const ATENDIMENTO_ID_DIGIT_REGEX = /\d/;
+const NOT_APPLICABLE = 'não se aplica';
+const PLACEHOLDER_VALUES = new Set([
+  'teste',
+  'test',
+  'oi',
+  'ola',
+  'nao informado',
+  'n/a',
+  'na',
+  'desconhecido',
+  '-',
+]);
+
+type RejectReason =
+  | 'trivial'
+  | 'empty'
+  | 'placeholder'
+  | 'no-evidence'
+  | 'duplicate'
+  | 'invalid-level'
+  | 'invalid-id'
+  | 'invalid-print';
 
 export class OpenAiIssueAssistant implements ReportAnalyzer, LevelNormalizer, TitleGenerator {
   constructor(private readonly deps: OpenAiIssueAssistantDependencies) {}
@@ -55,7 +81,12 @@ export class OpenAiIssueAssistant implements ReportAnalyzer, LevelNormalizer, Ti
           schema: INTAKE_JSON_SCHEMA,
         });
         const parsed = intakeResponseSchema.parse(raw);
-        return sanitizeIntake(parsed, input);
+        return sanitizeIntake(parsed, input, (fieldKey, reason) => {
+          this.deps.logger.debug(
+            { fieldKey, reason, schemaName: 'issue_intake' },
+            'Item do intake descartado',
+          );
+        });
       } catch (error) {
         lastError = error;
         this.deps.logger.warn(
@@ -139,20 +170,68 @@ function sanitizeIntake(
     attachments: MessageAttachment[];
     fields: FieldDefinition[];
   },
+  onReject: (fieldKey: string, reason: RejectReason) => void = () => undefined,
 ): ReportIntake {
   const values: Record<string, string> = {};
+  const grounding = buildGroundingText(input.message, input.attachments);
+  const trivial = !parsed.hasReportContent || isTrivialReport(input.message, input.attachments);
 
-  for (const field of input.fields) {
-    const item = parsed.items[field.key];
+  if (trivial) {
+    for (const field of input.fields) {
+      if (parsed.items[field.key]?.present) {
+        onReject(field.key, 'trivial');
+      }
+    }
+  } else {
+    const candidates: Array<{ key: string; value: string; normalizedValue: string }> = [];
 
-    if (!item?.present) {
-      continue;
+    for (const field of input.fields) {
+      const item = parsed.items[field.key];
+
+      if (!item?.present) {
+        continue;
+      }
+
+      const value = item.value.trim();
+
+      if (!value) {
+        onReject(field.key, 'empty');
+        continue;
+      }
+
+      const normalizedValue = normalizeForMatch(value);
+
+      if (PLACEHOLDER_VALUES.has(normalizedValue)) {
+        onReject(field.key, 'placeholder');
+        continue;
+      }
+
+      const evidence = normalizeForMatch(item.evidence);
+
+      if (evidence.length < MIN_EVIDENCE_CHARS || !grounding.includes(evidence)) {
+        onReject(field.key, 'no-evidence');
+        continue;
+      }
+
+      candidates.push({ key: field.key, value, normalizedValue });
     }
 
-    const value = item.value.trim();
+    const counts = new Map<string, number>();
 
-    if (value) {
-      values[field.key] = value;
+    for (const candidate of candidates) {
+      counts.set(candidate.normalizedValue, (counts.get(candidate.normalizedValue) ?? 0) + 1);
+    }
+
+    for (const candidate of candidates) {
+      const duplicated = (counts.get(candidate.normalizedValue) ?? 0) > 1;
+      const notApplicable = candidate.normalizedValue === normalizeForMatch(NOT_APPLICABLE);
+
+      if (duplicated && !notApplicable) {
+        onReject(candidate.key, 'duplicate');
+        continue;
+      }
+
+      values[candidate.key] = candidate.value;
     }
   }
 
@@ -160,16 +239,29 @@ function sanitizeIntake(
 
   if (level && isIssueLevel(level)) {
     values.nivel = level;
-  } else {
+  } else if (values.nivel !== undefined) {
     delete values.nivel;
+    onReject('nivel', 'invalid-level');
+  }
+
+  const atendimentoId = values.atendimentoId;
+
+  if (
+    atendimentoId !== undefined &&
+    normalizeForMatch(atendimentoId) !== normalizeForMatch(NOT_APPLICABLE) &&
+    !ATENDIMENTO_ID_DIGIT_REGEX.test(atendimentoId)
+  ) {
+    delete values.atendimentoId;
+    onReject('atendimentoId', 'invalid-id');
   }
 
   const printValue = resolvePrintValue(values.print, input.message, input.attachments);
 
   if (printValue) {
     values.print = printValue;
-  } else {
+  } else if (values.print !== undefined) {
     delete values.print;
+    onReject('print', 'invalid-print');
   }
 
   const missing = input.fields
@@ -177,6 +269,37 @@ function sanitizeIntake(
     .map((field) => field.key);
 
   return { values, missing };
+}
+
+function buildGroundingText(message: string, attachments: MessageAttachment[]): string {
+  const parts = [message];
+
+  for (const attachment of attachments) {
+    parts.push(attachment.url);
+
+    if (attachment.name) {
+      parts.push(attachment.name);
+    }
+  }
+
+  return normalizeForMatch(parts.join('\n'));
+}
+
+function isTrivialReport(message: string, attachments: MessageAttachment[]): boolean {
+  if (attachments.some((attachment) => attachment.isImage)) {
+    return false;
+  }
+
+  return message.trim().split(/\s+/).filter(Boolean).length < MIN_SUBSTANTIVE_WORDS;
+}
+
+function normalizeForMatch(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function resolvePrintValue(
@@ -193,16 +316,28 @@ function resolvePrintValue(
   const textUrls = message.match(IMAGE_URL_REGEX) ?? [];
 
   if (textUrls.length > 0) {
-    return unique(textUrls).join('\n');
+    return unique(textUrls.map(stripTrailingPunctuation)).join('\n');
   }
 
   const candidate = aiValue?.trim();
 
-  if (candidate && /https?:\/\//i.test(candidate)) {
-    return candidate;
+  if (!candidate) {
+    return '';
   }
 
-  return '';
+  const messageUrls = new Set(
+    (message.match(URL_REGEX) ?? []).map((url) => stripTrailingPunctuation(url)),
+  );
+  const grounded = candidate
+    .split(/\s+/)
+    .map((url) => stripTrailingPunctuation(url))
+    .filter((url) => /^https?:\/\//i.test(url) && messageUrls.has(url));
+
+  return unique(grounded).join('\n');
+}
+
+function stripTrailingPunctuation(value: string): string {
+  return value.replace(/[,.;!?)\]]+$/g, '');
 }
 
 function unique(values: string[]): string[] {

@@ -24,10 +24,10 @@ import { MemoryStore } from './helpers/memory-store.js';
 import { buildAttachment, buildState } from './helpers/state.js';
 
 class RecordingSender implements MessageSender {
-  readonly replies: Array<{ roomId: string; threadId: string; text: string }> = [];
+  readonly replies: Array<{ roomId: string; text: string }> = [];
 
-  async replyInThread(roomId: string, threadId: string, text: string): Promise<void> {
-    this.replies.push({ roomId, threadId, text });
+  async reply(roomId: string, text: string): Promise<void> {
+    this.replies.push({ roomId, text });
   }
 }
 
@@ -77,7 +77,6 @@ function incoming(text: string, attachments: MessageAttachment[] = []): Incoming
     username: 'ana',
     text,
     attachments,
-    threadId: 'msg-1',
   };
 }
 
@@ -135,6 +134,7 @@ describe('ConversationService', () => {
 
     expect(sender.replies).toHaveLength(1);
     const text = sender.replies[0]?.text ?? '';
+    expect(text.startsWith('@ana ')).toBe(true);
     expect(text).toContain('Recebi seu relato');
     expect(text).toContain('- ID do atendimento');
     expect(text).toContain('não se aplica');
@@ -147,6 +147,25 @@ describe('ConversationService', () => {
     expect(state?.questionQueue).toHaveLength(8);
   });
 
+  it('pergunta todos os campos sem resposta mesmo quando a IA informa faltantes incompletos', async () => {
+    const { service, repository, sender } = createService({
+      analyze: async () => ({ values: { nivel: 'PERDE VENDA' }, missing: [] }),
+    });
+
+    await service.handleMessage(incoming('teste'));
+
+    const text = sender.replies[0]?.text ?? '';
+    expect(text).toContain('Recebi seu relato');
+    expect(text).toContain('- ID do atendimento');
+    expect(text).toContain('- Print');
+    expect(text).toContain('Qual é o ID do atendimento?');
+
+    const state = await repository.get('room-1', 'user-1');
+    expect(state?.answers).toEqual({ nivel: 'PERDE VENDA' });
+    expect(state?.questionQueue).toHaveLength(8);
+    expect(state?.pendingFieldKey).toBe('atendimentoId');
+  });
+
   it('cria a issue direto quando todos os itens estão presentes', async () => {
     const { service, repository, sender, issueCreator, analyzer } = createService();
 
@@ -154,14 +173,16 @@ describe('ConversationService', () => {
 
     expect(analyzer.calls).toHaveLength(1);
     expect(issueCreator.calls).toHaveLength(1);
-    expect(issueCreator.calls[0]?.title).toBe('[PERDE VENDA] #ATD-1 - Erro ao finalizar pedido');
+    expect(issueCreator.calls[0]?.title).toBe('#ATD-1 - Erro ao finalizar pedido');
+    expect(issueCreator.calls[0]?.title).not.toContain('PERDE VENDA');
     expect(issueCreator.calls[0]?.labels).toEqual(['PERDE VENDA']);
     expect(issueCreator.calls[0]?.body).toContain('## Nível\n\nPERDE VENDA');
     expect(issueCreator.calls[0]?.body).toContain('## Regra de negócio\n\nPriorizar a venda');
 
     const completion = sender.replies.at(-1)?.text ?? '';
+    expect(completion.startsWith('@ana ')).toBe(true);
     expect(completion).toContain('#42');
-    expect(completion).toContain('[PERDE VENDA] #ATD-1 - Erro ao finalizar pedido');
+    expect(completion).toContain('#ATD-1 - Erro ao finalizar pedido');
     expect(completion).toContain('Nível: PERDE VENDA');
     expect(completion).toContain('Atendimento: ATD-1');
     expect(completion).toContain('https://github.com/acme/repo/issues/42');
@@ -263,15 +284,18 @@ describe('ConversationService', () => {
     expect(sender.replies[0]?.text).toContain('Qual é o nível');
 
     await service.handleMessage(incoming('urgente'));
-    expect(sender.replies.at(-1)?.text).toContain('ATRAPALHA');
-    expect(sender.replies.at(-1)?.text).toContain('PERDE VENDA');
+    const invalidLevelReply = sender.replies.at(-1)?.text ?? '';
+    expect(invalidLevelReply.startsWith('@ana ')).toBe(true);
+    expect(invalidLevelReply).toContain('ATRAPALHA');
+    expect(invalidLevelReply).toContain('PERDE VENDA');
 
     await service.handleMessage(incoming('não sei'));
 
     expect(levelNormalizer.calls).toHaveLength(2);
     expect(issueCreator.calls).toHaveLength(1);
     expect(issueCreator.calls[0]?.labels).toEqual(['ATRAPALHA']);
-    expect(issueCreator.calls[0]?.title.startsWith('[ATRAPALHA]')).toBe(true);
+    expect(issueCreator.calls[0]?.title.startsWith('ATRAPALHA')).toBe(false);
+    expect(issueCreator.calls[0]?.title).toBe('#ATD-1 - Erro ao finalizar pedido');
   });
 
   it('usa a fila completa quando a IA falha na avaliação inicial', async () => {
@@ -302,7 +326,9 @@ describe('ConversationService', () => {
     await service.handleMessage(incoming('Relato completo'));
 
     expect(issueCreator.calls).toHaveLength(1);
-    expect(sender.replies.at(-1)?.text).toContain('Não consegui criar a issue');
+    const failureReply = sender.replies.at(-1)?.text ?? '';
+    expect(failureReply.startsWith('@ana ')).toBe(true);
+    expect(failureReply).toContain('Não consegui criar a issue');
     expect(await repository.get('room-1', 'user-1')).toBeNull();
   });
 

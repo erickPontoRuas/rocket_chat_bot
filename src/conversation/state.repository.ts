@@ -101,11 +101,11 @@ function isConversationState(value: unknown): value is ConversationState {
   const candidate = value as Partial<ConversationState>;
 
   return (
-    candidate.version === 2 &&
+    candidate.version === 3 &&
     typeof candidate.roomId === 'string' &&
     typeof candidate.userId === 'string' &&
     typeof candidate.username === 'string' &&
-    typeof candidate.threadId === 'string' &&
+    typeof candidate.initialMessageId === 'string' &&
     typeof candidate.initialMessage === 'string' &&
     Array.isArray(candidate.initialAttachments) &&
     typeof candidate.status === 'string' &&

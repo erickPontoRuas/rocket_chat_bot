@@ -25,9 +25,12 @@ describe('buildIssueContent', () => {
       title: 'Erro ao finalizar pedido',
     });
 
-    expect(content.title).toBe('[PERDE VENDA] #ATD-1 - Erro ao finalizar pedido');
+    expect(content.title).toBe('#ATD-1 - Erro ao finalizar pedido');
+    expect(content.title).not.toContain('PERDE VENDA');
+    expect(content.title).not.toContain('ATRAPALHA');
     expect(content.labels).toEqual(['PERDE VENDA']);
     expect(content.body).toContain('**Solicitante:** ana');
+    expect(content.body).toContain('**Mensagem no Rocket.Chat:**');
     expect(content.body).toContain('https://chat.exemplo.com/channel/room-1?msg=msg-1');
     expect(content.body).toContain('**Nível:** PERDE VENDA');
 
@@ -48,7 +51,7 @@ describe('buildIssueContent', () => {
       title: 'Erro ao finalizar pedido',
     });
 
-    expect(content.title).toBe('[PERDE VENDA] Erro ao finalizar pedido');
+    expect(content.title).toBe('Erro ao finalizar pedido');
     expect(content.body).toContain('## ID do atendimento\n\nnão se aplica');
   });
 
@@ -66,7 +69,7 @@ describe('buildIssueContent', () => {
       title: '',
     });
 
-    expect(content.title).toBe('[PERDE VENDA] #ATD-1 - Cliente pediu para finalizar a compra');
+    expect(content.title).toBe('#ATD-1 - Cliente pediu para finalizar a compra');
   });
 
   it('usa a mensagem inicial no fallback quando o cliente não foi coletado', () => {
@@ -81,7 +84,7 @@ describe('buildIssueContent', () => {
       title: '',
     });
 
-    expect(content.title).toBe('[ATRAPALHA] #ATD-1 - Ao abrir a tela de pedidos recebo um erro.');
+    expect(content.title).toBe('#ATD-1 - Ao abrir a tela de pedidos recebo um erro.');
   });
 
   it('trunca títulos longos', () => {

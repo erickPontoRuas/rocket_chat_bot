@@ -6,18 +6,20 @@ const FIELD_KEYS = ISSUE_REPORT_FIELDS.map((field) => field.key);
 const INTAKE_ITEM_SCHEMA: Record<string, unknown> = {
   type: 'object',
   additionalProperties: false,
-  required: ['present', 'value'],
+  required: ['present', 'value', 'evidence'],
   properties: {
     present: { type: 'boolean' },
     value: { type: 'string' },
+    evidence: { type: 'string' },
   },
 };
 
 export const INTAKE_JSON_SCHEMA: Record<string, unknown> = {
   type: 'object',
   additionalProperties: false,
-  required: ['items'],
+  required: ['hasReportContent', 'items'],
   properties: {
+    hasReportContent: { type: 'boolean' },
     items: {
       type: 'object',
       additionalProperties: false,
@@ -49,11 +51,13 @@ export const TITLE_JSON_SCHEMA: Record<string, unknown> = {
 };
 
 export const intakeResponseSchema = z.object({
+  hasReportContent: z.boolean(),
   items: z.record(
     z.string(),
     z.object({
       present: z.boolean(),
       value: z.string(),
+      evidence: z.string(),
     }),
   ),
 });

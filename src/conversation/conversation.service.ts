@@ -148,10 +148,23 @@ export class ConversationService implements MessageProcessor {
     }
 
     state.answers = intake.values;
-    state.questionQueue = this.normalizeQueue(state, intake.missing);
+    state.questionQueue = this.normalizeQueue(state);
     state.intakeDone = true;
     state.pendingFieldKey = null;
     state.lastActivityAt = this.nowIso();
+
+    if (intake.missing.join(',') !== state.questionQueue.join(',')) {
+      this.deps.logger.warn(
+        {
+          roomId: state.roomId,
+          userId: state.userId,
+          reportedMissing: intake.missing,
+          computedMissing: state.questionQueue,
+        },
+        'Fila de perguntas divergiu da avaliação da IA; usando itens sem resposta',
+      );
+    }
+
     await this.deps.repository.save(state);
 
     this.deps.logger.info(
@@ -193,7 +206,7 @@ export class ConversationService implements MessageProcessor {
     await this.deps.repository.save(state);
 
     const text = intro ? `${intro}\n\n${field.question}` : field.question;
-    await this.deps.sender.replyInThread(state.roomId, state.threadId, text);
+    await this.send(state, text);
   }
 
   private async recordAnswer(state: ConversationState, message: IncomingMessage): Promise<void> {
@@ -225,7 +238,7 @@ export class ConversationService implements MessageProcessor {
         state.lastMessageId = message.id;
         state.lastActivityAt = this.nowIso();
         await this.deps.repository.save(state);
-        await this.deps.sender.replyInThread(state.roomId, state.threadId, INVALID_LEVEL_REPLY);
+        await this.send(state, INVALID_LEVEL_REPLY);
         return;
       } else {
         state.answers[key] = 'ATRAPALHA';
@@ -297,15 +310,14 @@ export class ConversationService implements MessageProcessor {
       await this.deps.repository.delete(state.roomId, state.userId);
 
       try {
-        await this.deps.sender.replyInThread(
-          state.roomId,
-          state.threadId,
+        await this.send(
+          state,
           buildCompletionMessage(state, content.title, issue.number, issue.url, level),
         );
       } catch (sendError) {
         this.deps.logger.error(
           { err: sendError, roomId: state.roomId, userId: state.userId, issueUrl: issue.url },
-          'Issue criada, mas falha ao enviar a confirmação na thread',
+          'Issue criada, mas falha ao enviar a confirmação no canal',
         );
       }
     } catch (error) {
@@ -321,7 +333,7 @@ export class ConversationService implements MessageProcessor {
       await this.deps.repository.delete(state.roomId, state.userId);
 
       try {
-        await this.deps.sender.replyInThread(state.roomId, state.threadId, ISSUE_FAILURE_REPLY);
+        await this.send(state, ISSUE_FAILURE_REPLY);
       } catch (sendError) {
         this.deps.logger.error(
           { err: sendError, roomId: state.roomId, userId: state.userId },
@@ -369,11 +381,9 @@ export class ConversationService implements MessageProcessor {
     return 'ATRAPALHA';
   }
 
-  private normalizeQueue(state: ConversationState, missing: string[]): string[] {
-    const missingSet = new Set(missing);
-
+  private normalizeQueue(state: ConversationState): string[] {
     return this.deps.fields
-      .filter((field) => missingSet.has(field.key) && !state.answers[field.key]?.trim())
+      .filter((field) => !state.answers[field.key]?.trim())
       .map((field) => field.key);
   }
 
@@ -392,9 +402,13 @@ export class ConversationService implements MessageProcessor {
     return this.deps.fields.find((field) => field.key === key);
   }
 
+  private async send(state: ConversationState, text: string): Promise<void> {
+    await this.deps.sender.reply(state.roomId, `@${state.username} ${text}`);
+  }
+
   private async notifyFailure(message: IncomingMessage): Promise<void> {
     try {
-      await this.deps.sender.replyInThread(message.roomId, message.threadId, GENERIC_FAILURE_REPLY);
+      await this.deps.sender.reply(message.roomId, `@${message.username} ${GENERIC_FAILURE_REPLY}`);
     } catch (error) {
       this.deps.logger.error({ err: error }, 'Falha ao enviar aviso de erro ao usuário');
     }
@@ -408,11 +422,11 @@ export class ConversationService implements MessageProcessor {
 
   private createState(message: IncomingMessage): ConversationState {
     return {
-      version: 2,
+      version: 3,
       roomId: message.roomId,
       userId: message.userId,
       username: message.username,
-      threadId: message.threadId,
+      initialMessageId: message.id,
       initialMessage: message.text,
       initialAttachments: message.attachments,
       status: 'collecting',

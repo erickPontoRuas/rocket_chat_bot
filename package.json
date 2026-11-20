@@ -2,7 +2,7 @@
   "name": "rocket-chat-issue-bot",
   "version": "0.1.0",
   "private": true,
-  "description": "Bot do Rocket.Chat que coleta informacoes em thread e cria issues no GitHub",
+  "description": "Bot do Rocket.Chat que coleta informacoes no canal e cria issues no GitHub",
   "type": "module",
   "engines": {
     "node": ">=20"

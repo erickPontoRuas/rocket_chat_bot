@@ -21,18 +21,18 @@ export function buildIssueContent(input: {
   title: string;
 }): IssueContent {
   return {
-    title: buildTitle(input.title, input.state, input.level),
+    title: buildTitle(input.title, input.state),
     body: buildBody(input.state, input.fields, input.rocketChatUrl, input.level),
     labels: [input.level],
   };
 }
 
-function buildTitle(aiTitle: string, state: ConversationState, level: IssueLevel): string {
+function buildTitle(aiTitle: string, state: ConversationState): string {
   const baseTitle = cleanTitle(aiTitle) || buildFallbackTitle(state);
   const atendimentoId = state.answers.atendimentoId?.trim();
   const idPart = atendimentoId && ID_FORMAT_REGEX.test(atendimentoId) ? `#${atendimentoId} - ` : '';
 
-  return truncate(`[${level}] ${idPart}${baseTitle}`, MAX_TITLE_LENGTH);
+  return truncate(`${idPart}${baseTitle}`, MAX_TITLE_LENGTH);
 }
 
 function buildFallbackTitle(state: ConversationState): string {
@@ -53,7 +53,7 @@ function buildBody(
   const header = [
     `**Solicitante:** ${state.username} (\`${state.userId}\`)`,
     `**Canal:** \`${state.roomId}\``,
-    `**Thread no Rocket.Chat:** ${buildThreadLink(rocketChatUrl, state)}`,
+    `**Mensagem no Rocket.Chat:** ${buildMessageLink(rocketChatUrl, state)}`,
     `**Nível:** ${level}`,
   ].join('\n');
 
@@ -78,9 +78,9 @@ function buildBody(
   return `${body.slice(0, MAX_BODY_LENGTH - notice.length).trimEnd()}${notice}`;
 }
 
-function buildThreadLink(rocketChatUrl: string, state: ConversationState): string {
+function buildMessageLink(rocketChatUrl: string, state: ConversationState): string {
   const baseUrl = rocketChatUrl.replace(/\/+$/, '');
-  return `${baseUrl}/channel/${encodeURIComponent(state.roomId)}?msg=${encodeURIComponent(state.threadId)}`;
+  return `${baseUrl}/channel/${encodeURIComponent(state.roomId)}?msg=${encodeURIComponent(state.initialMessageId)}`;
 }
 
 function cleanTitle(value: string): string {

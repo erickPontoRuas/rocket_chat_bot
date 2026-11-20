@@ -36,15 +36,26 @@ class FakeCompletionClient implements JsonCompletionClient {
   }
 }
 
-function intakeJson(items: Record<string, { present: boolean; value: string }>): string {
+function intakeJson(
+  items: Record<string, { present: boolean; value: string; evidence?: string }>,
+  hasReportContent = true,
+): string {
   const complete = Object.fromEntries(
-    ISSUE_REPORT_FIELDS.map((field) => [
-      field.key,
-      items[field.key] ?? { present: false, value: '' },
-    ]),
+    ISSUE_REPORT_FIELDS.map((field) => {
+      const item = items[field.key];
+
+      return [
+        field.key,
+        {
+          present: item?.present ?? false,
+          value: item?.value ?? '',
+          evidence: item?.evidence ?? '',
+        },
+      ];
+    }),
   );
 
-  return JSON.stringify({ items: complete });
+  return JSON.stringify({ hasReportContent, items: complete });
 }
 
 function createAssistant(client: JsonCompletionClient): OpenAiIssueAssistant {
@@ -55,22 +66,32 @@ describe('OpenAiIssueAssistant', () => {
   it('faz parse e sanitização do intake', async () => {
     const client = new FakeCompletionClient([
       intakeJson({
-        nivel: { present: true, value: 'perde venda' },
-        atendimentoId: { present: true, value: 'ATD-1' },
-        clienteDisse: { present: true, value: 'Quero finalizar a compra' },
-        print: { present: true, value: 'https://exemplo.com/print.png' },
+        nivel: { present: true, value: 'perde venda', evidence: 'PERDE VENDA' },
+        atendimentoId: { present: true, value: 'ATD-1', evidence: 'Atendimento ATD-1' },
+        clienteDisse: {
+          present: true,
+          value: 'Quero finalizar a compra',
+          evidence: 'Quero finalizar a compra',
+        },
+        print: {
+          present: true,
+          value: 'https://exemplo.com/print.png',
+          evidence: 'https://exemplo.com/print.png',
+        },
       }),
     ]);
     const assistant = createAssistant(client);
 
     const result = await assistant.analyze({
-      message: 'Relato',
+      message:
+        'Relato PERDE VENDA. Atendimento ATD-1. Quero finalizar a compra. Print: https://exemplo.com/print.png',
       attachments: [],
       fields: ISSUE_REPORT_FIELDS,
     });
 
     expect(result.values.nivel).toBe('PERDE VENDA');
     expect(result.values.atendimentoId).toBe('ATD-1');
+    expect(result.values.clienteDisse).toBe('Quero finalizar a compra');
     expect(result.values.print).toBe('https://exemplo.com/print.png');
     expect(result.missing).toContain('etapaFunil');
     expect(result.missing).not.toContain('atendimentoId');
@@ -98,23 +119,176 @@ describe('OpenAiIssueAssistant', () => {
   it('remove nível inválido e print sem URL dos itens presentes', async () => {
     const client = new FakeCompletionClient([
       intakeJson({
-        nivel: { present: true, value: 'urgente' },
-        print: { present: true, value: 'sim' },
-        atendimentoId: { present: true, value: 'ATD-1' },
+        nivel: { present: true, value: 'urgente', evidence: 'nível urgente' },
+        print: { present: true, value: 'sim', evidence: 'Relato com atendimento' },
+        atendimentoId: { present: true, value: 'ATD-1', evidence: 'ATD-1' },
       }),
     ]);
     const assistant = createAssistant(client);
 
     const result = await assistant.analyze({
-      message: 'Relato',
+      message: 'Relato com atendimento ATD-1 e nível urgente',
       attachments: [],
       fields: ISSUE_REPORT_FIELDS,
     });
 
     expect(result.values.nivel).toBeUndefined();
     expect(result.values.print).toBeUndefined();
+    expect(result.values.atendimentoId).toBe('ATD-1');
     expect(result.missing).toContain('nivel');
     expect(result.missing).toContain('print');
+  });
+
+  it('trata mensagem sem conteúdo como relato vazio, mesmo com itens marcados pela IA', async () => {
+    const echoed = Object.fromEntries(
+      ISSUE_REPORT_FIELDS.filter((field) => field.key !== 'nivel' && field.key !== 'print').map(
+        (field) => [field.key, { present: true, value: 'teste', evidence: 'teste' }],
+      ),
+    );
+    const client = new FakeCompletionClient([intakeJson(echoed)]);
+    const assistant = createAssistant(client);
+
+    const result = await assistant.analyze({
+      message: 'teste',
+      attachments: [],
+      fields: ISSUE_REPORT_FIELDS,
+    });
+
+    expect(result.values).toEqual({});
+    expect(result.missing).toHaveLength(ISSUE_REPORT_FIELDS.length);
+  });
+
+  it('descarta itens quando a IA classifica a mensagem como sem relato', async () => {
+    const client = new FakeCompletionClient([
+      intakeJson(
+        {
+          clienteDisse: { present: true, value: 'pediu ajuda', evidence: 'pediu ajuda' },
+          atendimentoId: { present: true, value: 'ATD-1', evidence: 'ATD-1' },
+        },
+        false,
+      ),
+    ]);
+    const assistant = createAssistant(client);
+
+    const result = await assistant.analyze({
+      message: 'pediu ajuda ATD-1',
+      attachments: [],
+      fields: ISSUE_REPORT_FIELDS,
+    });
+
+    expect(result.values).toEqual({});
+    expect(result.missing).toHaveLength(ISSUE_REPORT_FIELDS.length);
+  });
+
+  it('descarta item cuja evidência não está na mensagem', async () => {
+    const client = new FakeCompletionClient([
+      intakeJson({
+        clienteDisse: {
+          present: true,
+          value: 'Cliente pediu reembolso',
+          evidence: 'Cliente pediu reembolso',
+        },
+      }),
+    ]);
+    const assistant = createAssistant(client);
+
+    const result = await assistant.analyze({
+      message: 'O cliente pediu ajuda com o pedido',
+      attachments: [],
+      fields: ISSUE_REPORT_FIELDS,
+    });
+
+    expect(result.values.clienteDisse).toBeUndefined();
+    expect(result.missing).toContain('clienteDisse');
+  });
+
+  it('descarta valores repetidos entre campos, mas aceita "não se aplica"', async () => {
+    const duplicated = new FakeCompletionClient([
+      intakeJson({
+        etapaFunil: { present: true, value: 'checkout', evidence: 'checkout' },
+        regraNegocio: { present: true, value: 'checkout', evidence: 'checkout' },
+      }),
+    ]);
+    const first = await createAssistant(duplicated).analyze({
+      message: 'Problema no checkout durante o pagamento',
+      attachments: [],
+      fields: ISSUE_REPORT_FIELDS,
+    });
+
+    expect(first.values.etapaFunil).toBeUndefined();
+    expect(first.values.regraNegocio).toBeUndefined();
+
+    const notApplicable = new FakeCompletionClient([
+      intakeJson({
+        etapaFunil: { present: true, value: 'não se aplica', evidence: 'não se aplica' },
+        regraNegocio: { present: true, value: 'não se aplica', evidence: 'não se aplica' },
+      }),
+    ]);
+    const second = await createAssistant(notApplicable).analyze({
+      message: 'Problema no checkout. Não se aplica para etapa e regra.',
+      attachments: [],
+      fields: ISSUE_REPORT_FIELDS,
+    });
+
+    expect(second.values.etapaFunil).toBe('não se aplica');
+    expect(second.values.regraNegocio).toBe('não se aplica');
+  });
+
+  it('descarta ID de atendimento sem dígitos', async () => {
+    const client = new FakeCompletionClient([
+      intakeJson({
+        atendimentoId: { present: true, value: 'ABC', evidence: 'atendimento ABC' },
+      }),
+    ]);
+    const assistant = createAssistant(client);
+
+    const result = await assistant.analyze({
+      message: 'Relato com atendimento ABC e problema no checkout',
+      attachments: [],
+      fields: ISSUE_REPORT_FIELDS,
+    });
+
+    expect(result.values.atendimentoId).toBeUndefined();
+    expect(result.missing).toContain('atendimentoId');
+  });
+
+  it('descarta URL de print que não existe na mensagem ou nos anexos', async () => {
+    const client = new FakeCompletionClient([
+      intakeJson({
+        print: {
+          present: true,
+          value: 'https://inventado.com/print.png',
+          evidence: 'Relato sem link',
+        },
+      }),
+    ]);
+    const assistant = createAssistant(client);
+
+    const result = await assistant.analyze({
+      message: 'Relato sem link de imagem',
+      attachments: [],
+      fields: ISSUE_REPORT_FIELDS,
+    });
+
+    expect(result.values.print).toBeUndefined();
+    expect(result.missing).toContain('print');
+  });
+
+  it('aceita print por URL presente no texto mesmo sem extensão de imagem', async () => {
+    const url = 'https://chat.exemplo.com/file/abc123';
+    const client = new FakeCompletionClient([
+      intakeJson({ print: { present: true, value: url, evidence: url } }),
+    ]);
+    const assistant = createAssistant(client);
+
+    const result = await assistant.analyze({
+      message: `Segue o print: ${url}`,
+      attachments: [],
+      fields: ISSUE_REPORT_FIELDS,
+    });
+
+    expect(result.values.print).toBe(url);
+    expect(result.missing).not.toContain('print');
   });
 
   it('normaliza a resposta de nível e trata NENHUM como nulo', async () => {
@@ -156,12 +330,12 @@ describe('OpenAiIssueAssistant', () => {
   it('tenta o intake novamente quando a primeira resposta é inválida', async () => {
     const client = new FakeCompletionClient([
       'não é json',
-      intakeJson({ nivel: { present: true, value: 'ATRAPALHA' } }),
+      intakeJson({ nivel: { present: true, value: 'ATRAPALHA', evidence: 'ATRAPALHA' } }),
     ]);
     const assistant = createAssistant(client);
 
     const result = await assistant.analyze({
-      message: 'Relato',
+      message: 'Relato ATRAPALHA',
       attachments: [],
       fields: ISSUE_REPORT_FIELDS,
     });

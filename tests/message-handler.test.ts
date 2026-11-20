@@ -57,16 +57,18 @@ describe('MessageHandler', () => {
       roomId: 'room-1',
       userId: 'user-1',
       username: 'ana',
-      threadId: 'message-1',
     });
+    expect(service.messages[0]).not.toHaveProperty('threadId');
   });
 
-  it('usa o tmid como thread da conversa', async () => {
+  it('aceita mensagem vinda de uma thread existente', async () => {
     const { handler, service } = createHandler();
 
     await handler.handle(buildEvent({ tmid: 'thread-root' }));
 
-    expect(service.messages[0]?.threadId).toBe('thread-root');
+    expect(service.messages).toHaveLength(1);
+    expect(service.messages[0]?.id).toBe('message-1');
+    expect(service.messages[0]).not.toHaveProperty('threadId');
   });
 
   it('não encaminha a mesma mensagem duas vezes', async () => {

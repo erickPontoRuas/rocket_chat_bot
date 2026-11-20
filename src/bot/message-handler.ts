@@ -62,7 +62,6 @@ export class MessageHandler {
         username,
         text,
         attachments,
-        threadId: message.tmid?.trim() || messageId,
       });
     } catch (error) {
       this.deps.logger.error({ err: error, messageId, roomId }, 'Falha ao processar mensagem');

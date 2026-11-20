@@ -8,11 +8,11 @@ export interface MessageAttachment {
 }
 
 export interface ConversationState {
-  version: 2;
+  version: 3;
   roomId: string;
   userId: string;
   username: string;
-  threadId: string;
+  initialMessageId: string;
   initialMessage: string;
   initialAttachments: MessageAttachment[];
   status: ConversationStatus;
@@ -36,7 +36,6 @@ export interface IncomingMessage {
   username: string;
   text: string;
   attachments: MessageAttachment[];
-  threadId: string;
 }
 
 export interface FieldDefinition {
@@ -47,7 +46,7 @@ export interface FieldDefinition {
 }
 
 export interface MessageSender {
-  replyInThread(roomId: string, threadId: string, text: string): Promise<void>;
+  reply(roomId: string, text: string): Promise<void>;
 }
 
 export interface CreatedIssue {

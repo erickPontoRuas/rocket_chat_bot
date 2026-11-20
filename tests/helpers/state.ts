@@ -2,11 +2,11 @@ import type { ConversationState, MessageAttachment } from '../../src/conversatio
 
 export function buildState(overrides: Partial<ConversationState> = {}): ConversationState {
   return {
-    version: 2,
+    version: 3,
     roomId: 'room-1',
     userId: 'user-1',
     username: 'ana',
-    threadId: 'msg-1',
+    initialMessageId: 'msg-1',
     initialMessage: 'Ao abrir a tela de pedidos recebo um erro.',
     initialAttachments: [],
     status: 'collecting',

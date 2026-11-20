@@ -31,14 +31,14 @@ export const ISSUE_REPORT_FIELDS: FieldDefinition[] = [
   },
   {
     key: 'botFez',
-    label: 'O que o bot (sistema externo) fez',
-    question: 'O que o bot do sistema externo fez?',
+    label: 'O que o bot fez',
+    question: 'O que o bot fez?',
     allowsNotApplicable: true,
   },
   {
     key: 'botDeveriaTerFeito',
-    label: 'O que o bot (sistema externo) deveria ter feito',
-    question: 'O que o bot do sistema externo deveria ter feito?',
+    label: 'O que o bot deveria ter feito',
+    question: 'O que o bot deveria ter feito?',
     allowsNotApplicable: true,
   },
   {
